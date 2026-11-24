@@ -598,3 +598,25 @@ async def sse_items() -> AsyncIterable[Item]:
         yield item
 ```
 
+如果需要设置SSE字段可以使用`ServerSentEvent`,如果想要发送原始数据可以使用 `raw_data` 
+
+```python
+@app.get("/items/stream", response_class=EventSourceResponse)
+async def stream_items() -> AsyncIterable[ServerSentEvent]:
+    yield ServerSentEvent(comment="stream of item updates")
+    for i, item in enumerate(items):
+        yield ServerSentEvent(data=item, event="item_update", id=str(i + 1), retry=5000)
+        
+@app.get("/logs/stream", response_class=EventSourceResponse)
+async def stream_logs() -> AsyncIterable[ServerSentEvent]:
+    logs = [
+        "2025-01-01 INFO  Application started",
+        "2025-01-01 DEBUG Connected to database",
+        "2025-01-01 WARN  High memory usage detected",
+    ]
+    for log_line in logs:
+        yield ServerSentEvent(raw_data=log_line)
+        
+# data 和 raw_data 是互斥的
+```
+

@@ -13,12 +13,10 @@ class ChatRequest(BaseModel):
     messages: list[ChatMessage]
     max_tokens: int = Field(default=1024, gt=0)
     temperature: float = Field(default=1.0, ge=0.0, le=2.0)
-    stream: Literal[True, False] = False
     thinking: dict = Field(default={'type': 'disabled'})
 
 
 class ChatResponse(BaseModel):
-    role: str
     model: str
     content: str
-    usage_token: int
+    usage_token: int | None = None
