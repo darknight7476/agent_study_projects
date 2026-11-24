@@ -32,6 +32,15 @@ class User(BaseModel):
     name: str = "John Doe"
     signup_ts: datetime | None = None
     friends: list[int] = []
+    
+# 除了常规的定义方式还能够使用Field定义
+class Item(BaseModel):
+    name: str
+    description: str | None = Field(
+        default=None, title="The description of the item", max_length=300
+    )
+    price: float = Field(gt=0, description="The price must be greater than zero")
+    tax: float | None = None
 ```
 
 ``Annotated``支持在类型提示中加入额外的**元数据**
@@ -39,6 +48,65 @@ class User(BaseModel):
 ```python
 def say_hello(name: Annotated[str, "this is just metadata"]) -> str:
 ```
+
+pydantic还支持额外的JSON Schema，会原样添加到模型的JSON Schema，也可以直接在`Filed`中声明
+
+```python
+class Item(BaseModel):
+    name: str
+    description: str | None = None
+    price: float
+    tax: float | None = None
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "name": "Foo",
+                    "description": "A very nice Item",
+                    "price": 35.4,
+                    "tax": 3.2,
+                }
+            ]
+        }
+    }
+    
+class Item(BaseModel):
+    name: str = Field(examples=["Foo"])
+    description: str | None = Field(default=None, examples=["A very nice Item"])
+    price: float = Field(examples=[35.4])
+    tax: float | None = Field(default=None, examples=[3.2])
+```
+
+`model_dump`能够返回模型数据的`dict`配合`**dict`能够将其解包为键和值作为关键字参数直接传递
+
+```python
+# 利用其它pydantic模型数据生成新的pydantic模型
+user_dict = user_in.model_dump()
+UserInDB(**user_dict)
+'''
+UserInDB(
+    username=user_dict["username"],
+    password=user_dict["password"],
+    email=user_dict["email"],
+    full_name=user_dict["full_name"],
+)
+'''
+
+
+# 还支持额外添加关键字
+UserInDB(**user_in.model_dump(), hashed_password=hashed_password)
+'''UserInDB(
+    username=user_dict["username"],
+    password=user_dict["password"],
+    email=user_dict["email"],
+    full_name=user_dict["full_name"],
+    hashed_password=hashed_password,
+)
+'''
+```
+
+
 
 ## 并发与异步
 
@@ -99,7 +167,110 @@ asyncio.run(主协程)
 
 FastAPI利用schema来标准化所有的自定义API方便后续的复用，常用POST、GET、PUT、DELETE四种操作
 
-### 路径操作
+### 查询
+
+声明的参数不是路径参数时会自动解释为查询参数，查询字符串是键值对的集合，这些键值对位于 URL 的`?`之后，以`&`分隔，可以享受类型声明的福利，也可设置默认值，不过此时参数就不是必选的了(**有且只有设置默认值之后才会变成可选**，也不支持除默认值外设置为`None`)
+
+```python
+from typing import Annotated
+from fastapi import FastAPI, Query
+
+
+@app.get("/items/{item_id}")
+async def read_item(item_id: str, q: Annotated[str | None, Query(max_length=50)] = None, short: bool = False):
+    item = {"item_id": item_id}
+    if q:
+        item.update({"q": q})
+    if not short:
+        item.update(
+            {"description": "This is an amazing item that has a long description"}
+        )
+    return item
+
+http://127.0.0.1:8000/items/?skip=0&limit=10
+```
+
+可以使用`Annotated`加上`fastapi`的`Query`对参数进行额外校验
+
+> 这里用的是 `Query()`，因为这是一个**查询参数**。`Path()`、`Body()`、`Header()` 和 `Cookie()`，它们也接受与 `Query()` 相同的参数
+
+声明类型为`list`的查询参数需要显式使用`Query()`,否则会被识别为请求体
+
+```python
+@app.get("/items/")
+async def read_items(q: Annotated[list[str] | None, Query()] = ["foo", "bar"]):
+    query_items = {"q": q}
+    return query_items
+
+# 也可以不指明list内类型，此时fastapi不会检查里面的类型
+@app.get("/items/")
+async def read_items(q: Annotated[list, Query()] = []):
+    query_items = {"q": q}
+    return query_items
+
+# Query支持更多参数声明
+# 别名参数能够使用alias声明
+"""
+Query(
+            title="Query string",
+            description="Query string for the items to search in the database that have a good match",
+            min_length=3,
+            alias = 'item-query',
+            deprecated=True, # 说明参数已弃用
+            include_in_schema = False # 将不再OpenAPI中排除
+            ge = 1, # 数值校验同理还有gt和le
+        ),
+"""
+
+
+```
+
+还可以使用自定义校验函数结合`AfterValidator`进行额外校验
+
+```python
+ef check_valid_id(id: str):
+    if not id.startswith(("isbn-", "imdb-")):
+        raise ValueError('Invalid ID format, it must start with "isbn-" or "imdb-"')
+    return id
+
+
+@app.get("/items/")
+async def read_items(
+    id: Annotated[str | None, AfterValidator(check_valid_id)] = None,
+):
+    if id:
+        item = data.get(id)
+    else:
+        id, item = random.choice(list(data.items()))
+    return {"id": id, "name": item}
+```
+
+在需要多个查询参数的时候可以将他们归并到一个`pydantic`模型中简化代码
+
+可以使用 Pydantic 的模型配置来 `forbid` 任何 `extra` 字段**限制**要接收的查询参数
+
+```python
+class Pagination(BaseModel):
+    limit: int = Field(10, ge=1)
+    offset: int = Field(0, ge=0)
+
+
+class Filters(BaseModel):
+    tags: list[str] = []
+
+
+@app.get("/items/")
+def read_items(
+    pagination: Annotated[Pagination, Query()],
+    filters: Annotated[Filters, Query()],
+    search: str | None = None,
+):
+    return {"pagination": pagination, "filters": filters, "search": search}
+# 在查询时不用使用函数中声明的变量名，而是按照类内属性传输
+# 如果pydantic模型共享参数每个模型都会单独验证
+```
+
+### 路径
 
 FastAPI常使用`@app.操作("/路径")`的方式来声明不同路由下的操作函数
 
@@ -154,32 +325,11 @@ async def get_model(model_name: ModelName):
 
 同时路径参数也允许接收路径作为参数
 
-### 查询
+路径参数校验使用`Path`与`Query`参数一致
 
-声明的参数不是路径参数时会自动解释为查询参数，查询字符串是键值对的集合，这些键值对位于 URL 的`?`之后，以`&`分隔，可以享受类型声明的福利，也可设置默认值，不过此时参数就不是必选的了
+> 路径参数是必需的，使用`Path`声明的不能有默认值
 
-```python
-from typing import Annotated
-from fastapi import FastAPI, Query
-
-
-@app.get("/items/{item_id}")
-async def read_item(item_id: str, q: Annotated[str | None, Query(max_length=50)] = None, short: bool = False):
-    item = {"item_id": item_id}
-    if q:
-        item.update({"q": q})
-    if not short:
-        item.update(
-            {"description": "This is an amazing item that has a long description"}
-        )
-    return item
-
-http://127.0.0.1:8000/items/?skip=0&limit=10
-```
-
-可以使用`Annotated`加上`fastapi`的`Query`对参数进行额外校验
-
-> 这里用的是 `Query()`，因为这是一个**查询参数**。`Path()`、`Body()`、`Header()` 和 `Cookie()`，它们也接受与 `Query()` 相同的参数。
+路径操作中可以使用`status_code`声明HTTP状态码
 
 ### 请求体
 
@@ -211,5 +361,240 @@ async def update_item(item_id: int, item: Item, q: str | None = None):
     if q:
         result.update({"q": q})
     return result
+```
+
+请求体可以包含显式的`null`值
+
+当存在多个`pydantic`请求体参数时请求体构建需要带上对应的键名(在单个请求体模型时也希望请求体格式也是键值对,`Annotated[Item, Body(embed=True)]`)
+
+```python
+{
+    "item": {
+        "name": "Foo",
+        "description": "The pretender",
+        "price": 42.0,
+        "tax": 3.2
+    },
+    "user": {
+        "username": "dave",
+        "full_name": "Dave Grohl"
+    }
+}
+```
+
+针对单一值做请求体，fastapi提供`Body`声明
+
+OpenAPI也支持提供示例
+
+```python
+@app.put("/items/{item_id}")
+async def update_item(
+    item_id: int,
+    item: Annotated[
+        Item,
+        Body(
+            examples=[
+                {
+                    "name": "Foo",
+                    "description": "A very nice Item",
+                    "price": 35.4,
+                    "tax": 3.2,
+                }
+            ],
+        ),
+    ],
+):
+    results = {"item_id": item_id, "item": item}
+    return results
+
+@app.put("/items/{item_id}")
+async def update_item(
+    *,
+    item_id: int,
+    item: Annotated[
+        Item,
+        Body(
+            examples=[
+                {
+                    "name": "Foo",
+                    "description": "A very nice Item",
+                    "price": 35.4,
+                    "tax": 3.2,
+                },
+                {
+                    "name": "Bar",
+                    "price": "35.4",
+                },
+                {
+                    "name": "Baz",
+                    "price": "thirty five point four",
+                },
+            ],
+        ),
+    ],
+):
+    results = {"item_id": item_id, "item": item}
+    return results
+
+
+"""
+summary：该示例的简短描述。
+description：较长描述，可以包含 Markdown 文本。
+value：实际展示的示例，例如一个 dict。
+externalValue：value 的替代项，指向该示例的 URL。不过它的工具支持度可能不如 value
+"""
+@app.put("/items/{item_id}")
+async def update_item(
+    *,
+    item_id: int,
+    item: Annotated[
+        Item,
+        Body(
+            openapi_examples={
+                "normal": {
+                    "summary": "A normal example",
+                    "description": "A **normal** item works correctly.",
+                    "value": {
+                        "name": "Foo",
+                        "description": "A very nice Item",
+                        "price": 35.4,
+                        "tax": 3.2,
+                    },
+                },
+                "converted": {
+                    "summary": "An example with converted data",
+                    "description": "FastAPI can convert price `strings` to actual `numbers` automatically",
+                    "value": {
+                        "name": "Bar",
+                        "price": "35.4",
+                    },
+                },
+                "invalid": {
+                    "summary": "Invalid data is rejected with an error",
+                    "value": {
+                        "name": "Baz",
+                        "price": "thirty five point four",
+                    },
+                },
+            },
+        ),
+    ],
+):
+    results = {"item_id": item_id, "item": item}
+    return results
+```
+
+### Cookie和Header
+
+`Header`和`Cookie`声明和`Query`和`Path`一样,一定要加入`Cookie()、Header()`,`JavaScript`一般接触不到cookie
+
+标准请求头使用-连接，但是python中是不允许的，所以`Header`会自动把_改为-
+
+请求头同时也是不区分大小写的
+
+它们同样支持pydantic
+
+```python
+class Cookies(BaseModel):
+    model_config = {"extra": "forbid"}
+    
+    session_id: str
+    fatebook_tracker: str | None = None
+    googall_tracker: str | None = None
+
+
+@app.get("/items/")
+async def read_items(cookies: Annotated[Cookies| None, Cookie()]= None):
+    return cookies
+
+class ClientHeaders(BaseModel):
+    x_client_name: str
+    x_client_version: str
+
+
+@app.get("/items/")
+async def read_items(client: Annotated[ClientHeaders | None, Header()] = None):
+    return client
+```
+
+### 响应
+
+直接使用类型注解指明输出类型，自动完成校验
+
+```python
+@app.post("/items/")
+async def create_item(item: Item) -> Item:
+    return item
+```
+
+如果希望返回的数据与声明类型不完全一致，但是希望使用pydantic模型的校验功能可以在路径操作钟加入装饰器参数`response_model`
+
+>**函数返回注解 (`-> Any` 或 `-> dict`)**：反映函数**内部**的真实返回类型，让静态检查工具满意，但是此时无法生成对外的API文档来进行校验
+>
+>**装饰器参数 (`response_model=UserPublic`)**：明确告诉 FastAPI 对外**运行时**的响应，将内部运行和外部声明解耦，可以保证响应输出严格按照模型指定内容输出，不存在数据泄露
+>
+>但是使用response_model之后我们就失去了对返回类型的检查支持
+
+```python
+@app.post("/items/", response_model=Item)
+async def create_item(item: Item) -> Any:
+    return item
+```
+
+为了保持对返回类型的检查支持，我们可以通过对子类继承的方法实现上述功能，但要注意必须是pydantic类或者Response类及其子类，dict等是不支持的。 `response_model=None` 可以禁用fastapi执行文档校验和数据过滤
+
+```python
+class BaseUser(BaseModel):
+    username: str
+    email: EmailStr
+    full_name: str | None = None
+
+
+class UserIn(BaseUser):
+    password: str
+
+
+@app.post("/user/")
+async def create_user(user: UserIn) -> BaseUser:
+    return user
+```
+
+同样在定义类时可以使用默认值，如果想要在返回的响应中不要出现冗长的默认值，可以使用 `response_model_exclude_unset=True`，这样响应只会包含被显式设置的值
+
+### 流式传输
+
+常使用`JSON Lines`作为流式输出常用格式，响应类型为`application/jsonl`
+
+```python
+{"name": "Plumbus", "description": "A multi-purpose household device."}
+{"name": "Portal Gun", "description": "A portal opening device."}
+{"name": "Meeseeks Box", "description": "A box that summons a Meeseeks."}
+```
+
+对于非一次性输出完整内容可以使用`yield`生成器，对于其输出类型已知可以使用Iterable进行输出类型声明，即便不用fastapi也会自己转换数据格式
+
+除此以外还可以使用**SSE(服务器发送事件)**响应类型为`text/event-stream` 
+
+```python
+data: {"name": "Portal Gun", "price": 999.99}
+# 注意中间多一个空行
+data: {"name": "Plumbus", "price": 32.99}
+```
+
+```python
+class Item(BaseModel):
+    name: str
+    description: str | None
+
+items = [
+    Item(name="Plumbus", description="A multi-purpose household device."),
+    Item(name="Portal Gun", description="A portal opening device."),
+    Item(name="Meeseeks Box", description="A box that summons a Meeseeks."),
+]
+
+@app.get("/items/stream", response_class=EventSourceResponse)
+async def sse_items() -> AsyncIterable[Item]:
+    for item in items:
+        yield item
 ```
 

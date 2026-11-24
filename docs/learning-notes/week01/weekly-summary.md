@@ -6,11 +6,9 @@
 
 - [x] 环境搭建
 - [x] Github仓库创建
-- [ ] FastAPI提供接口
-- [ ] Pydantic
-- [ ] 实现调用DeepSeekAPI的FastAPI服务
-- [ ] 完成流式输出
-- [ ] pytest自动测试
-- [ ] 编写运行说明
-
-# 下周计划
+- [x] FastAPI提供接口
+- [x] Pydantic
+- [x] 实现调用DeepSeekAPI的FastAPI服务
+- [x] 完成流式输出
+- [x] pytest自动测试
+- [x] 编写运行说明
