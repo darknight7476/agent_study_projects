@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 from app.api.chat import app
+from unittest.mock import AsyncMock
 
 client = TestClient(app)
 

@@ -65,16 +65,15 @@ async def deepseek_chat_stram(messages: ChatRequest) -> AsyncIterable[ServerSent
                     content=content
                 )
                 yield ServerSentEvent(
-                    data=result.model_dump(),
+                    raw_data=result.model_dump_json(exclude_none=True),
                     event="message"
                 )
         yield ServerSentEvent(
-            raw_data="[DONE]",
-            event='done'
+            raw_data="[DONE]"
         )
     except Exception as e:
         yield ServerSentEvent(
-            data={"message": "模型调用失败" + str(e)},
+            data={"message": f"error:{str(e)}"},
             event="error"
         )
 
